@@ -51,6 +51,29 @@ Linux / macOS:
 
 `start.bat` / `start.sh` 现在只负责提示这两个命令，不再自动帮你开窗口。
 
+## 打包 EXE
+
+Windows:
+
+```bat
+packaging\windows\build.bat
+```
+
+打包脚本会自动：
+
+- 安装后端依赖、`PyInstaller` 和 `pywebview`
+- 构建前端静态文件
+- 生成桌面程序 `packaging\windows\dist\AutoChatGPTManager.exe`
+- 生成安装包 `packaging\windows\dist\AutoChatGPTManager-Setup.exe`
+
+运行安装包后，会把桌面程序安装到当前用户目录，并创建开始菜单快捷方式；程序启动后会以内嵌桌面窗口打开，不再跳浏览器。
+
+说明：
+
+- 安装目录下的 `.env` 会作为运行配置
+- SQLite 数据库会写入 `data\auto_chatgpt.db`
+- `packaging\windows\build` 和 `packaging\windows\dist` 都是本地产物，默认不会提交到 Git
+
 ### 3. 配置 Codex
 
 PowerShell:
@@ -114,6 +137,12 @@ auto_chatgpt/
 │   ├── requirements.txt
 │   └── requirements-unsupported-automation.txt
 ├── frontend/
+├── packaging/
+│   └── windows/
+│       ├── build.bat
+│       ├── installer.py
+│       ├── launcher.py
+│       └── *.spec
 ├── .env.example
 ├── .gitignore
 ├── start.bat

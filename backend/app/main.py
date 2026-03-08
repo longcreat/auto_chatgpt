@@ -11,6 +11,7 @@ from app.database import init_db
 from app.routers import accounts, codex, domains, tokens
 from app.routers import settings as settings_router
 from app.services.codex_service import reload_active_account
+from app.runtime import get_bundle_root
 
 
 logging.basicConfig(
@@ -59,7 +60,7 @@ def health():
     }
 
 
-frontend_build = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+frontend_build = get_bundle_root() / "frontend" / "dist"
 assets_dir = frontend_build / "assets"
 if assets_dir.exists():
     app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")

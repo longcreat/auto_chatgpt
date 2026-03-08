@@ -1,10 +1,12 @@
 from pathlib import Path
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.runtime import get_app_root
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = get_app_root()
 ENV_FILE = ROOT_DIR / ".env"
 DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3000",
@@ -54,6 +56,19 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = ",".join(DEFAULT_CORS_ORIGINS)
 
     REGISTRATION_TIMEOUT: int = 120
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_value(cls, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "dev", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+        return value
 
     @classmethod
     def settings_customise_sources(
