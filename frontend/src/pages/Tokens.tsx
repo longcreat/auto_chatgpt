@@ -3,14 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronDown, ChevronUp, KeyRound, Plus, Trash2 } from 'lucide-react'
 import { createToken, deleteToken, fetchAccountToken, getAccounts, getTokens, invalidateExpiredTokens } from '../api'
 
-const TOKEN_TYPES = ['access_token', 'refresh_token', 'api_key', 'session_token']
+const TOKEN_TYPES = ['access_token', 'refresh_token', 'id_token', 'session_token']
 
 /** 每种 token 对应的样式 */
 const TOKEN_COLORS: Record<string, string> = {
   access_token:  'bg-blue-900/50 text-blue-300',
   refresh_token: 'bg-purple-900/50 text-purple-300',
+  id_token:      'bg-indigo-900/50 text-indigo-300',
   session_token: 'bg-cyan-900/50 text-cyan-300',
-  api_key:       'bg-amber-900/50 text-amber-300',
 }
 
 function hasValidToken(tokens: any[], type: string) {
@@ -72,9 +72,9 @@ export default function Tokens() {
 
   const accountTokens = (accountId: number) =>
     (allTokens as any[])
-      .filter((t: any) => t.account_id === accountId)
+      .filter((t: any) => t.account_id === accountId && TOKEN_TYPES.includes(t.token_type))
       .sort((a: any, b: any) => {
-        const order = ['access_token', 'refresh_token', 'session_token', 'api_key']
+        const order = ['access_token', 'refresh_token', 'id_token', 'session_token']
         return order.indexOf(a.token_type) - order.indexOf(b.token_type)
       })
 
@@ -102,8 +102,8 @@ export default function Tokens() {
 
       {/* 提示 */}
       <div className="mb-5 rounded-xl border border-blue-900/50 bg-blue-950/30 px-4 py-3 text-xs text-blue-200 space-y-1">
-        <p>Codex 代理仅使用激活账号的 <span className="font-mono">api_key</span> 或 <span className="font-mono">access_token</span>。</p>
-        <p className="text-blue-300/50">注：当前注册流程走 Codex OAuth，不经过 chatgpt.com，故不产生 <span className="font-mono">session_token</span>，这是正常现象，不影响 Codex 使用。</p>
+        <p>这里仅展示 OAuth 相关 Token：<span className="font-mono">access_token</span> / <span className="font-mono">refresh_token</span> / <span className="font-mono">id_token</span> / <span className="font-mono">session_token</span>。</p>
+        <p className="text-blue-300/50">刷新 Token 后，系统会自动删除旧记录和已过期记录，只保留最新一组。</p>
       </div>
 
       {/* 全局添加 Token 面板 */}
@@ -172,8 +172,8 @@ export default function Tokens() {
               <th className="text-left px-4 py-2.5">邮箱</th>
               <th className="text-left px-4 py-2.5">access_token</th>
               <th className="text-left px-4 py-2.5">refresh_token</th>
+              <th className="text-left px-4 py-2.5">id_token</th>
               <th className="text-left px-4 py-2.5">session_token</th>
-              <th className="text-left px-4 py-2.5">api_key</th>
               <th className="text-left px-4 py-2.5">有效/总计</th>
               <th className="text-left px-4 py-2.5">操作</th>
             </tr>
@@ -207,26 +207,24 @@ export default function Tokens() {
                       <StatusDot ok={hasValidToken(tokens, 'refresh_token')} label="refresh" />
                     </td>
                     <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                      <StatusDot ok={hasValidToken(tokens, 'session_token')} label="session" />
+                      <StatusDot ok={hasValidToken(tokens, 'id_token')} label="id" />
                     </td>
                     <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                      <StatusDot ok={hasValidToken(tokens, 'api_key')} label="api_key" />
+                      <StatusDot ok={hasValidToken(tokens, 'session_token')} label="session" />
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500" onClick={e => e.stopPropagation()}>
                       {tokens.filter((t: any) => t.is_valid).length} / {tokens.length}
                     </td>
                     <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
-                        {!hasValidToken(tokens, 'access_token') && (
-                          <button
-                            onClick={() => fetchTokenMut.mutate(account.id)}
-                            disabled={fetchTokenMut.isPending}
-                            title="自动获取 OAuth Token"
-                            className="text-gray-500 hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-wait"
-                          >
-                            <KeyRound size={14} />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => fetchTokenMut.mutate(account.id)}
+                          disabled={fetchTokenMut.isPending}
+                          title="刷新 OAuth Token"
+                          className="text-gray-500 hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-wait"
+                        >
+                          <KeyRound size={14} />
+                        </button>
                         <button
                           onClick={() => {
                             setAddingFor(isAddingHere ? null : account.id)
@@ -349,7 +347,7 @@ export default function Tokens() {
                   {isExpanded && tokens.length === 0 && !isAddingHere && (
                     <tr className="border-b border-gray-800/30">
                       <td colSpan={8} className="text-center py-4 text-gray-600 text-xs">
-                        此账号暂无 Token — 点击 <KeyRound size={11} className="inline mx-1" /> 自动获取或 <Plus size={11} className="inline mx-1" /> 手动添加
+                        此账号暂无 Token — 点击 <KeyRound size={11} className="inline mx-1" /> 刷新获取或 <Plus size={11} className="inline mx-1" /> 手动添加
                       </td>
                     </tr>
                   )}

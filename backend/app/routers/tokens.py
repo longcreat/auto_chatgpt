@@ -11,6 +11,7 @@ from app.schemas import MessageResponse, TokenCreate, TokenOut, TokenUpdate
 from app.serializers import serialize_token
 from app.services import codex_service
 from app.services.credential_service import sync_account_credentials
+from app.services.token_service import cleanup_token_store, replace_account_tokens
 
 
 router = APIRouter(prefix="/api/tokens", tags=["Tokens"])
@@ -22,6 +23,10 @@ def _reload_active_cache() -> None:
 
 @router.get("", response_model=List[TokenOut])
 def list_tokens(account_id: Optional[int] = None, db: Session = Depends(get_db)):
+    deleted = cleanup_token_store(db, account_id=account_id)
+    if deleted:
+        db.commit()
+
     query = db.query(Token)
     if account_id is not None:
         query = query.filter(Token.account_id == account_id)
@@ -35,10 +40,19 @@ def create_token(body: TokenCreate, db: Session = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    token = Token(**body.model_dump())
-    db.add(token)
+    replace_account_tokens(
+        db,
+        account,
+        {body.token_type: (body.token_value, body.expires_at)},
+    )
     db.commit()
-    db.refresh(token)
+
+    token = db.query(Token).filter(
+        Token.account_id == body.account_id,
+        Token.token_type == body.token_type,
+    ).order_by(Token.created_at.desc(), Token.id.desc()).first()
+    if not token:
+        raise HTTPException(status_code=500, detail="Token 保存失败")
 
     if sync_account_credentials(db, account):
         account.updated_at = datetime.utcnow()
@@ -90,29 +104,8 @@ def delete_token(token_id: int, db: Session = Depends(get_db)):
 
 @router.post("/invalidate-expired", response_model=MessageResponse)
 def invalidate_expired(db: Session = Depends(get_db)):
-    now = datetime.utcnow()
-    expired_tokens = db.query(Token).filter(
-        Token.expires_at.is_not(None),
-        Token.expires_at < now,
-        Token.is_valid.is_(True),
-    ).all()
-
-    for token in expired_tokens:
-        token.is_valid = False
-        token.updated_at = now
-
-    affected_account_ids = {token.account_id for token in expired_tokens}
+    deleted = cleanup_token_store(db)
     db.commit()
 
-    changed = False
-    for account_id in affected_account_ids:
-        account = db.query(Account).filter(Account.id == account_id).first()
-        if account and sync_account_credentials(db, account):
-            account.updated_at = now
-            changed = True
-
-    if changed:
-        db.commit()
-
     _reload_active_cache()
-    return {"message": f"已标记 {len(expired_tokens)} 个过期 Token 为无效"}
+    return {"message": f"已清理 {deleted} 条过期或旧 Token"}

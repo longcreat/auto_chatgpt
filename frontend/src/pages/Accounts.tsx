@@ -95,16 +95,14 @@ export default function Accounts() {
                     >
                       <Zap size={14} />
                     </button>
-                    {!account.has_access_token && (
-                      <button
-                        onClick={() => fetchTokenMut.mutate(account.id)}
-                        disabled={fetchTokenMut.isPending}
-                        title="获取 Token"
-                        className="text-gray-500 hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-wait"
-                      >
-                        <KeyRound size={14} />
-                      </button>
-                    )}
+                    <button
+                      onClick={() => fetchTokenMut.mutate(account.id)}
+                      disabled={fetchTokenMut.isPending}
+                      title="刷新 Token"
+                      className="text-gray-500 hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-wait"
+                    >
+                      <KeyRound size={14} />
+                    </button>
                     <button
                       onClick={() => { if (confirm('确认删除？')) deleteMut.mutate(account.id) }}
                       title="删除账号"

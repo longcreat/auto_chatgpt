@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,9 +10,11 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import Account, Token
+from app.services.token_service import replace_account_tokens
 
 
 AUTH_FILE = Path.home() / ".codex" / "auth.json"
+logger = logging.getLogger(__name__)
 
 
 def _resolve_auth_file(auth_file: Optional[Path] = None) -> Path:
@@ -95,6 +98,34 @@ def _latest_valid_token(db: Session, account_id: int, token_type: str) -> Option
     return token.token_value if token else None
 
 
+def _jwt_expires_at(token: Optional[str]) -> Optional[datetime]:
+    payload = _decode_jwt_payload(token)
+    exp = payload.get("exp")
+    if isinstance(exp, (int, float)):
+        return datetime.utcfromtimestamp(exp)
+    return None
+
+
+def _persist_oauth_bundle(
+    db: Session,
+    account: Account,
+    access_token: Optional[str],
+    refresh_token: Optional[str],
+    id_token: Optional[str],
+) -> None:
+    replace_account_tokens(
+        db,
+        account,
+        {
+            "access_token": (access_token, _jwt_expires_at(access_token)),
+            "refresh_token": (refresh_token, None),
+            "id_token": (id_token, None),
+        },
+    )
+    db.commit()
+    db.refresh(account)
+
+
 def _build_plugin_status(path: Path, payload: Optional[dict[str, Any]], parse_error: Optional[str]) -> dict[str, Any]:
     result = {
         "auth_file": str(path),
@@ -145,7 +176,7 @@ def _build_plugin_status(path: Path, payload: Optional[dict[str, Any]], parse_er
     if result["auth_mode"] == "chatgpt" and not result["has_refresh_token"]:
         result["warning"] = "当前插件为 ChatGPT 模式，但缺少 refresh_token"
     elif result["auth_mode"] == "chatgpt" and not result["has_id_token"]:
-        result["warning"] = "当前插件缺少 id_token，但通常不影响 access_token/refresh_token 登录"
+        result["warning"] = "当前插件登录包缺少 id_token，切插件账号时容易被判定为未登录"
     elif result["auth_mode"] != "chatgpt" and result["has_openai_api_key"]:
         result["warning"] = "当前插件使用 API Key 模式，不是 ChatGPT 登录态"
 
@@ -162,13 +193,29 @@ def switch_plugin_account(
     account: Account,
     auth_file: Optional[Path] = None,
 ) -> dict[str, Any]:
+    from app.services import registration_service
+
     access_token = _latest_valid_token(db, account.id, "access_token") or account.access_token
     refresh_token = _latest_valid_token(db, account.id, "refresh_token")
+    id_token = _latest_valid_token(db, account.id, "id_token")
+
+    if not refresh_token:
+        raise ValueError("账号缺少可用 refresh_token，无法切换 Codex 插件登录态")
+
+    refresh_warning = None
+    refreshed_tokens = registration_service.refresh_oauth_tokens(refresh_token, log_fn=logger.info)
+    if refreshed_tokens:
+        access_token = refreshed_tokens.get("access_token") or access_token
+        refresh_token = refreshed_tokens.get("refresh_token") or refresh_token
+        id_token = refreshed_tokens.get("id_token") or id_token
+        _persist_oauth_bundle(db, account, access_token, refresh_token, id_token)
+    else:
+        refresh_warning = "refresh_token 自动续期失败，已回退到数据库中的现有令牌。"
 
     if not access_token:
-        raise ValueError("账号缺少可用 access_token，无法写入 Codex 插件登录态")
-    if not refresh_token:
-        raise ValueError("账号缺少可用 refresh_token，无法写入 Codex 插件登录态")
+        raise ValueError("账号缺少可用 access_token，且 refresh_token 未能换出新 access_token")
+    if not id_token:
+        raise ValueError("账号缺少可用 id_token，且 refresh_token 未能补全完整登录包，无法切换插件登录态")
 
     access_payload = _decode_jwt_payload(access_token)
     auth_claims = access_payload.get("https://api.openai.com/auth") or {}
@@ -176,14 +223,10 @@ def switch_plugin_account(
     plugin_account_id = auth_claims.get("chatgpt_account_id")
     if not plugin_account_id:
         raise ValueError("access_token 中缺少 chatgpt_account_id，无法切换插件登录态")
+    id_payload = _decode_jwt_payload(id_token)
+    email = profile_claims.get("email") or id_payload.get("email") or account.email
 
-    path, existing_payload, _ = _read_auth_payload(auth_file)
-    existing_tokens = existing_payload.get("tokens") if isinstance(existing_payload, dict) else None
-    current_id_token = existing_tokens.get("id_token") if isinstance(existing_tokens, dict) else None
-    current_id_payload = _decode_jwt_payload(current_id_token)
-    current_email = current_id_payload.get("email")
-
-    id_token = current_id_token if current_email == account.email else None
+    path, _, _ = _read_auth_payload(auth_file)
     payload = {
         "auth_mode": "chatgpt",
         "OPENAI_API_KEY": None,
@@ -197,18 +240,16 @@ def switch_plugin_account(
     }
 
     path, backup_path = _write_auth_payload(payload, auth_file)
-    warning = None
-    if not id_token:
-        warning = "未找到匹配账号的 id_token，已仅写入 access_token/refresh_token；如界面未立即刷新，可重载 VS Code 窗口。"
+    warning = refresh_warning
 
     return {
         "success": True,
-        "message": f"已写入 Codex 插件登录态: {account.email}",
+        "message": f"已写入 Codex 插件登录态: {email}",
         "db_account_id": account.id,
-        "email": profile_claims.get("email") or account.email,
+        "email": email,
         "plugin_account_id": plugin_account_id,
         "auth_file": str(path),
         "backup_file": str(backup_path) if backup_path else None,
-        "requires_reload": bool(warning),
+        "requires_reload": True,
         "warning": warning,
     }

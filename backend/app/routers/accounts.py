@@ -8,7 +8,7 @@ from typing import List
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.database import Account, RegistrationTask, Token, get_db
+from app.database import Account, RegistrationTask, get_db
 from app.schemas import (
     AccountCreate,
     AccountOut,
@@ -21,6 +21,7 @@ from app.schemas import (
 from app.serializers import serialize_account
 from app.services import codex_service
 from app.services.settings_service import get_domain_name
+from app.services.token_service import replace_account_tokens
 
 
 router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
@@ -30,6 +31,12 @@ def _random_domain_email() -> str:
     prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     domain = get_domain_name()
     return f"{prefix}@{domain}"
+
+
+def _access_token_expires_at(result: dict) -> datetime | None:
+    from app.services import registration_service
+
+    return registration_service.oauth_access_token_expires_at(result)
 
 
 def _run_registration_task(task_id: int, email: str, db_session):
@@ -54,23 +61,23 @@ def _run_registration_task(task_id: int, email: str, db_session):
                     password=result["password"],
                     session_token=result.get("session_token"),
                     access_token=result.get("access_token"),
+                    token_expires_at=_access_token_expires_at(result),
                     status="active",
                 )
                 db.add(acc)
                 db.commit()
                 db.refresh(acc)
 
-                # 将 OAuth token 写入 tokens 表
-                for ttype in ("access_token", "refresh_token", "session_token"):
-                    tval = result.get(ttype)
-                    if tval:
-                        tok = Token(
-                            account_id=acc.id,
-                            token_type=ttype,
-                            token_value=tval,
-                            is_valid=True,
-                        )
-                        db.add(tok)
+                replace_account_tokens(
+                    db,
+                    acc,
+                    {
+                        "access_token": (result.get("access_token"), _access_token_expires_at(result)),
+                        "refresh_token": (result.get("refresh_token"), None),
+                        "id_token": (result.get("id_token"), None),
+                        "session_token": (result.get("session_token"), None),
+                    },
+                )
                 db.commit()
 
                 task.status = "done"
@@ -142,22 +149,8 @@ def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(g
         setattr(account, key, value)
 
     if "api_key" in body.model_fields_set:
-        now = datetime.utcnow()
-        db.query(Token).filter(
-            Token.account_id == account.id,
-            Token.token_type == "api_key",
-            Token.is_valid.is_(True),
-        ).update({"is_valid": False, "updated_at": now})
         account.api_key = api_key or None
-        if api_key:
-            db.add(
-                Token(
-                    account_id=account.id,
-                    token_type="api_key",
-                    token_value=api_key,
-                    is_valid=True,
-                )
-            )
+        replace_account_tokens(db, account, {"api_key": (api_key or None, None)})
 
     account.updated_at = datetime.utcnow()
     db.commit()
@@ -204,6 +197,7 @@ async def refresh_token(account_id: int, db: Session = Depends(get_db)):
 
     account.session_token = token
     account.updated_at = datetime.utcnow()
+    replace_account_tokens(db, account, {"session_token": (token, None)})
     db.commit()
     codex_service.reload_active_account()
     return {"message": "Token 刷新成功"}
@@ -232,24 +226,18 @@ async def fetch_account_token(account_id: int, db: Session = Depends(get_db)):
 
     # 更新 Account
     account.access_token = result.get("access_token")
+    account.token_expires_at = _access_token_expires_at(result)
     account.updated_at = datetime.utcnow()
 
-    # invalidate 旧 token, 写入新 token
-    db.query(Token).filter(
-        Token.account_id == account.id,
-        Token.token_type.in_(["access_token", "refresh_token"]),
-        Token.is_valid.is_(True),
-    ).update({"is_valid": False, "updated_at": datetime.utcnow()}, synchronize_session="fetch")
-
-    for ttype in ("access_token", "refresh_token"):
-        tval = result.get(ttype)
-        if tval:
-            db.add(Token(
-                account_id=account.id,
-                token_type=ttype,
-                token_value=tval,
-                is_valid=True,
-            ))
+    replace_account_tokens(
+        db,
+        account,
+        {
+            "access_token": (result.get("access_token"), _access_token_expires_at(result)),
+            "refresh_token": (result.get("refresh_token"), None),
+            "id_token": (result.get("id_token"), None),
+        },
+    )
 
     db.commit()
     codex_service.reload_active_account()

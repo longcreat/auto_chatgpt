@@ -37,7 +37,7 @@ import base64
 import logging
 import traceback
 from typing import Optional, Tuple, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from curl_cffi import requests as curl_requests
@@ -336,6 +336,16 @@ def _proxy_url() -> Optional[str]:
     """从数据库配置构建代理 URL"""
     from app.services.settings_service import get_proxy_url
     return get_proxy_url()
+
+
+def oauth_access_token_expires_at(tokens: Optional[dict]) -> Optional[datetime]:
+    """从 OAuth token 响应推导 access_token 过期时间。"""
+    if not isinstance(tokens, dict):
+        return None
+    expires_in = tokens.get("expires_in")
+    if not isinstance(expires_in, (int, float)):
+        return None
+    return datetime.utcnow() + timedelta(seconds=float(expires_in))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1422,6 +1432,8 @@ def register_account(email: str, log_lines: list) -> dict:
             if tokens:
                 result["access_token"] = tokens.get("access_token")
                 result["refresh_token"] = tokens.get("refresh_token")
+                result["id_token"] = tokens.get("id_token")
+                result["expires_in"] = tokens.get("expires_in")
                 log_fn("  ✅ Codex Token 已获取")
             else:
                 log_fn("  ⚠️ OAuth 未成功 (注册仍有效)")
@@ -1485,12 +1497,60 @@ def refresh_session_token(email: str, password: str) -> Optional[str]:
         return None
 
 
+def refresh_oauth_tokens(refresh_token: str, log_fn=None) -> Optional[Dict[str, Any]]:
+    """
+    使用 refresh_token 直接向 auth.openai.com 申请新的一组 OAuth token。
+
+    返回 access_token / refresh_token / id_token / expires_in 等字段。
+    """
+    proxy = _proxy_url()
+    fp = generate_fingerprint()
+    session = curl_requests.Session(impersonate=fp["impersonate"])
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+
+    logger_fn = log_fn or logger.info
+    try:
+        resp = session.post(
+            f"{OAUTH_ISSUER}/oauth/token",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": fp["user_agent"],
+            },
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": OAUTH_CLIENT_ID,
+            },
+            timeout=60,
+        )
+    except Exception as exc:
+        logger_fn(f"[OAuth-refresh] refresh_token 交换异常: {exc}")
+        session.close()
+        return None
+
+    try:
+        if resp.status_code != 200:
+            logger_fn(f"[OAuth-refresh] refresh_token 交换失败: {resp.status_code} {resp.text[:200]}")
+            return None
+
+        tokens = resp.json()
+        if tokens.get("access_token") and tokens.get("refresh_token"):
+            return tokens
+
+        logger_fn("[OAuth-refresh] 响应缺少 access_token 或 refresh_token")
+        return None
+    finally:
+        session.close()
+
+
 def fetch_tokens_for_account(email: str, password: str, log_lines: list) -> dict:
     """
     为已注册的账号获取 OAuth Token (同步函数)。
     用于注册时 Token 获取失败的账号, 补充获取 access_token / refresh_token。
 
-    返回: { success, access_token, refresh_token, error }
+    返回: { success, access_token, refresh_token, id_token, expires_in, error }
     """
     def log_fn(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -1506,13 +1566,22 @@ def fetch_tokens_for_account(email: str, password: str, log_lines: list) -> dict
     log_fn(f"═══ 补获 Token: {email} ═══")
     log_fn(f"  Chrome {registrar.major} ({registrar.impersonate}) | {registrar.fp['platform_name']} | {registrar.fp['screen_resolution']}")
 
-    result = {"success": False, "access_token": None, "refresh_token": None, "error": None}
+    result = {
+        "success": False,
+        "access_token": None,
+        "refresh_token": None,
+        "id_token": None,
+        "expires_in": None,
+        "error": None,
+    }
 
     try:
         tokens = registrar.oauth_login(email, password)
         if tokens:
             result["access_token"] = tokens.get("access_token")
             result["refresh_token"] = tokens.get("refresh_token")
+            result["id_token"] = tokens.get("id_token")
+            result["expires_in"] = tokens.get("expires_in")
             result["success"] = True
             log_fn("  ✅ Codex Token 获取成功")
         else:

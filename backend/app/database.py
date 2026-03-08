@@ -57,7 +57,7 @@ class Token(Base):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
 
-    # token 类型: session_token / access_token / api_key / refresh_token
+    # token 类型: session_token / access_token / refresh_token / id_token / api_key
     token_type = Column(String(50), nullable=False)
     token_value = Column(Text, nullable=False)
     expires_at = Column(DateTime, nullable=True)

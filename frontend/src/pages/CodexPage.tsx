@@ -91,7 +91,9 @@ export default function CodexPage() {
   }
 
   const proxyUrl = status?.proxy_url ?? 'http://127.0.0.1:8000/v1'
-  const pluginAuthReady = Boolean(pluginStatus?.has_access_token && pluginStatus?.has_refresh_token)
+  const pluginAuthReady = Boolean(
+    pluginStatus?.has_access_token && pluginStatus?.has_refresh_token && pluginStatus?.has_id_token,
+  )
 
   const setupCommands = [
     { label: 'Linux / macOS', cmd: `export OPENAI_API_BASE="${proxyUrl}"` },
@@ -186,7 +188,11 @@ export default function CodexPage() {
               : <XCircle size={16} className="text-yellow-400" />
             }
             <span className="font-medium">
-              {pluginStatus?.email ? `当前插件账号: ${pluginStatus.email}` : '未识别插件登录账号'}
+              {pluginStatus?.email
+                ? `当前插件账号: ${pluginStatus.email}`
+                : pluginAuthReady
+                  ? '未识别插件登录账号'
+                  : '当前插件本地登录包不完整'}
             </span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
@@ -235,7 +241,9 @@ export default function CodexPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {accounts.map((acc: any) => {
             const tokenTypes = tokenTypesByAccount.get(acc.id) ?? new Set<string>()
-            const ready = tokenTypes.has('access_token') && tokenTypes.has('refresh_token')
+            const hasRefresh = tokenTypes.has('refresh_token')
+            const hasId = tokenTypes.has('id_token')
+            const ready = hasRefresh
             const isCurrentPluginAccount = pluginStatus?.email === acc.email
 
             return (
@@ -258,7 +266,11 @@ export default function CodexPage() {
                 <div className="flex-1 text-left">
                   <p className="font-mono text-xs truncate">{acc.email}</p>
                   <p className={`text-xs mt-0.5 ${ready ? 'text-green-500' : 'text-gray-500'}`}>
-                    {ready ? 'access_token + refresh_token ✓' : '缺少 access_token 或 refresh_token'}
+                    {ready
+                      ? hasId
+                        ? 'refresh_token + id_token ✓'
+                        : '有 refresh_token，切换时自动补全完整登录包'
+                      : '缺少 refresh_token'}
                   </p>
                 </div>
                 {isCurrentPluginAccount && <CheckCircle size={14} className="text-blue-400 flex-shrink-0" />}
@@ -272,6 +284,7 @@ export default function CodexPage() {
 
         <div className="mt-4 p-3 bg-amber-900/20 border border-amber-800/50 rounded-lg text-xs text-amber-200">
           这里切的是 VS Code Codex 插件本地登录态，会直接写入 <span className="font-mono">~/.codex/auth.json</span>。
+          系统会优先用 <span className="font-mono">refresh_token</span> 换取新的 <span className="font-mono">access_token / refresh_token / id_token</span> 完整登录包。
           如果侧边栏没有立刻刷新，执行 VS Code 的 <span className="font-mono">Developer: Reload Window</span>。
         </div>
       </div>
