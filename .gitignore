@@ -1,0 +1,31 @@
+# 敏感配置（绝不提交）
+.env
+
+# Python 虚拟环境
+.venv/
+
+# Python 编译产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+
+# 数据库与日志（含用户数据）
+*.db
+*.log
+data/
+backend/data/
+
+# 运行时产物 / Playwright 会话数据
+output/
+.playwright-cli/
+
+# 前端依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+
+# 编辑器
+.vscode/
