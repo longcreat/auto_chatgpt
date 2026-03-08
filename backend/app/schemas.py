@@ -109,6 +109,34 @@ class CodexSwitchResult(BaseModel):
     email: Optional[str] = None
 
 
+class CodexPluginStatusOut(BaseModel):
+    auth_file: str
+    exists: bool
+    auth_mode: Optional[str] = None
+    email: Optional[str] = None
+    plugin_account_id: Optional[str] = None
+    plan_type: Optional[str] = None
+    has_openai_api_key: bool = False
+    has_access_token: bool = False
+    has_refresh_token: bool = False
+    has_id_token: bool = False
+    access_token_expires_at: Optional[datetime] = None
+    last_refresh: Optional[datetime] = None
+    warning: Optional[str] = None
+
+
+class CodexPluginSwitchResult(BaseModel):
+    success: bool
+    message: str
+    db_account_id: int
+    email: str
+    plugin_account_id: Optional[str] = None
+    auth_file: str
+    backup_file: Optional[str] = None
+    requires_reload: bool = False
+    warning: Optional[str] = None
+
+
 class MessageResponse(BaseModel):
     message: str
     success: bool = True

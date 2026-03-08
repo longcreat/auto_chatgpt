@@ -47,3 +47,6 @@ export const testProxy = (data: any) => api.post('/settings/test-proxy', data).t
 export const getCodexStatus = () => api.get('/codex/status').then(r => r.data)
 export const codexSwitch = (id: number) => api.post('/codex/switch', { account_id: id }).then(r => r.data)
 export const codexReload = () => api.post('/codex/reload').then(r => r.data)
+export const getCodexPluginStatus = () => api.get('/codex/plugin-status').then(r => r.data)
+export const switchCodexPluginAccount = (id: number) =>
+  api.post('/codex/plugin-switch', { account_id: id }).then(r => r.data)

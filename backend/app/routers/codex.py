@@ -10,9 +10,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import Account, get_db
-from app.schemas import AccountSwitchRequest, CodexStatusOut, CodexSwitchResult
+from app.schemas import (
+    AccountSwitchRequest,
+    CodexPluginStatusOut,
+    CodexPluginSwitchResult,
+    CodexStatusOut,
+    CodexSwitchResult,
+)
 from app.serializers import mask_secret
-from app.services import codex_service
+from app.services import codex_plugin_service, codex_service
 
 
 router = APIRouter(tags=["Codex"])
@@ -51,6 +57,23 @@ def codex_switch(body: AccountSwitchRequest, db: Session = Depends(get_db)):
 def codex_reload():
     codex_service.reload_active_account()
     return {"message": "已重新加载激活账号"}
+
+
+@router.get("/api/codex/plugin-status", response_model=CodexPluginStatusOut)
+def codex_plugin_status():
+    return codex_plugin_service.get_plugin_status()
+
+
+@router.post("/api/codex/plugin-switch", response_model=CodexPluginSwitchResult)
+def codex_plugin_switch(body: AccountSwitchRequest, db: Session = Depends(get_db)):
+    account = db.query(Account).filter(Account.id == body.account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    try:
+        return codex_plugin_service.switch_plugin_account(db, account)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.api_route(
