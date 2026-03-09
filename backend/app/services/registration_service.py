@@ -1405,9 +1405,12 @@ class ChatGPTRegistrar:
 #  公共 API
 # ═══════════════════════════════════════════════════════════════
 
-def register_account(email: str, log_lines: list) -> dict:
+def register_account(email: str, log_lines: list = None, log_sink=None) -> dict:
     """
     注册单个 ChatGPT 账号 (同步函数, 供后台任务直接调用)。
+
+    log_lines: 兼容旧接口, 传入列表则将格式化日志行追加到其中。
+    log_sink:  新接口, 传入可调用对象 (接收已格式化的含时间戳日志行)。
 
     返回: { success, email, password, session_token, access_token, refresh_token, error }
     """
@@ -1415,7 +1418,10 @@ def register_account(email: str, log_lines: list) -> dict:
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         logger.info(msg)
-        log_lines.append(line)
+        if log_sink is not None:
+            log_sink(line)
+        elif log_lines is not None:
+            log_lines.append(line)
 
     proxy = _proxy_url()
     if proxy:

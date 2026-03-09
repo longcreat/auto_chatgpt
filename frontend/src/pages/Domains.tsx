@@ -2,12 +2,12 @@ import { Fragment, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown, ChevronUp, Globe, Loader2, Mail, Plus, RefreshCw,
-  Save, Server, Shield, Trash2, CheckCircle, XCircle, UserPlus, Settings,
+  Save, Server, Shield, Trash2, CheckCircle, XCircle, UserPlus, Settings, RotateCcw,
 } from 'lucide-react'
 import {
   getAliases, generateAliases, createCustomAlias, deleteAlias, verifyCFConfig,
   getSettings, updateSettings, testImap, testProxy,
-  autoRegister, getRegistrationTasks,
+  autoRegister, getRegistrationTasks, retryRegistrationTask,
 } from '../api'
 
 /* ─── 标签页类型 ─── */
@@ -77,27 +77,45 @@ export default function Domains() {
   const [regCount, setRegCount] = useState(1)
   const [selectedAliases, setSelectedAliases] = useState<number[]>([])
   const [regError, setRegError] = useState('')
-  const [expandedTask, setExpandedTask] = useState<number | null>(null)
+  const [taskError, setTaskError] = useState('')
+  const [expandedTasks, setExpandedTasks] = useState<number[]>([])
 
   const { data: tasks = [] } = useQuery({
     queryKey: ['tasks'],
     queryFn: getRegistrationTasks,
-    refetchInterval: tab === 'tasks' ? 3000 : false,
+    refetchInterval: tab === 'tasks' ? 1000 : false,
   })
 
   const registerMut = useMutation({
     mutationFn: autoRegister,
-    onSuccess: () => {
+    onSuccess: (createdTasks: any[]) => {
       qc.invalidateQueries({ queryKey: ['tasks'] })
       setRegError('')
+      setTaskError('')
       setSelectedAliases([])
+      setExpandedTasks(prev => Array.from(new Set([...prev, ...createdTasks.map((task: any) => task.id)])))
       setTab('tasks')
     },
     onError: (e: any) => setRegError(e?.response?.data?.detail ?? e?.message ?? '请求失败'),
   })
+  const retryMut = useMutation({
+    mutationFn: retryRegistrationTask,
+    onSuccess: (task: any) => {
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+      setTaskError('')
+      setExpandedTasks(prev => Array.from(new Set([...prev, task.id])))
+      setTab('tasks')
+    },
+    onError: (e: any) => setTaskError(e?.response?.data?.detail ?? e?.message ?? '重试失败'),
+  })
 
   const usedCount = aliases.filter((a: any) => a.is_used).length
   const availableAliases = aliases.filter((a: any) => !a.is_used)
+  const toggleTask = (taskId: number) => {
+    setExpandedTasks(prev => (
+      prev.includes(taskId) ? prev.filter(id => id !== taskId) : [...prev, taskId]
+    ))
+  }
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -484,15 +502,11 @@ export default function Domains() {
                 if (regMode === 'batch') {
                   registerMut.mutate({ use_domain_email: true, count: regCount })
                 } else {
-                  // 选择模式：为每个选中的邮箱分别发起注册
                   const emails = selectedAliases.map(id => {
                     const a = aliases.find((x: any) => x.id === id)
                     return a?.alias
                   }).filter(Boolean)
-                  // 逐个注册
-                  emails.forEach((email: string) => {
-                    registerMut.mutate({ email, use_domain_email: false, count: 1 })
-                  })
+                  registerMut.mutate({ emails, use_domain_email: false, count: emails.length })
                 }
               }}
               className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
@@ -513,7 +527,13 @@ export default function Domains() {
       {/* ═══════════════════════════ 注册任务 ═══════════════════════════ */}
       {tab === 'tasks' && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+          {taskError && (
+            <div className="mx-4 mt-4 rounded-lg border border-red-800/50 bg-red-900/20 px-3 py-2 text-xs text-red-400">
+              {taskError}
+            </div>
+          )}
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-sm">
             <thead>
               <tr className="text-gray-500 text-xs border-b border-gray-800 bg-gray-800/30">
                 <th className="text-left px-4 py-2.5">ID</th>
@@ -521,6 +541,7 @@ export default function Domains() {
                 <th className="text-left px-4 py-2.5">状态</th>
                 <th className="text-left px-4 py-2.5">创建时间</th>
                 <th className="text-left px-4 py-2.5">日志</th>
+                <th className="text-left px-4 py-2.5">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -534,22 +555,32 @@ export default function Domains() {
                       {new Date(task.created_at).toLocaleString('zh-CN')}
                     </td>
                     <td className="px-4 py-3">
-                      {task.log && (
+                      <button
+                        onClick={() => toggleTask(task.id)}
+                        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+                      >
+                        {expandedTasks.includes(task.id) ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                        {expandedTasks.includes(task.id) ? '收起' : '查看'}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3">
+                      {task.status === 'failed' && (
                         <button
-                          onClick={() => setExpandedTask(expandedTask === task.id ? null : task.id)}
-                          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+                          onClick={() => retryMut.mutate(task.id)}
+                          disabled={retryMut.isPending}
+                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-50"
                         >
-                          {expandedTask === task.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                          查看
+                          {retryMut.isPending ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                          重试
                         </button>
                       )}
                     </td>
                   </tr>
-                  {expandedTask === task.id && task.log && (
+                  {expandedTasks.includes(task.id) && (
                     <tr className="border-b border-gray-800/50">
-                      <td colSpan={5} className="px-4 py-3">
-                        <pre className="bg-gray-950 rounded p-3 text-xs text-gray-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
-                          {task.log}
+                      <td colSpan={6} className="px-4 py-3 max-w-0">
+                        <pre className="w-full overflow-x-auto break-all bg-gray-950 rounded p-3 text-xs text-gray-400 font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
+                          {task.log || '等待日志输出...'}
                         </pre>
                       </td>
                     </tr>
@@ -557,10 +588,11 @@ export default function Domains() {
                 </Fragment>
               ))}
               {tasks.length === 0 && (
-                <tr><td colSpan={5} className="text-center py-10 text-gray-600">暂无注册任务</td></tr>
+                <tr><td colSpan={6} className="text-center py-10 text-gray-600">暂无注册任务</td></tr>
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

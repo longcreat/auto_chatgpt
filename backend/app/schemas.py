@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AccountCreate(BaseModel):
@@ -78,6 +78,7 @@ class GenerateAliasRequest(BaseModel):
 
 
 class RegistrationRequest(BaseModel):
+    emails: list[str] = Field(default_factory=list)
     email: Optional[str] = None
     use_domain_email: bool = True
     count: int = 1

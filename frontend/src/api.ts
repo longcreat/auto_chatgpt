@@ -15,6 +15,7 @@ export const fetchAccountToken = (id: number) => api.post(`/accounts/${id}/fetch
 export const autoRegister = (data: any) => api.post('/accounts/register', data).then(r => r.data)
 export const getRegistrationTasks = () => api.get('/accounts/tasks').then(r => r.data)
 export const getTask = (id: number) => api.get(`/accounts/tasks/${id}`).then(r => r.data)
+export const retryRegistrationTask = (id: number) => api.post(`/accounts/tasks/${id}/retry`).then(r => r.data)
 
 // ─── Token ────────────────────────────────────────────────────
 

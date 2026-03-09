@@ -11,6 +11,7 @@ from app.database import init_db
 from app.routers import accounts, codex, domains, tokens
 from app.routers import settings as settings_router
 from app.services.codex_service import reload_active_account
+from app.services.registration_task_service import registration_task_manager
 from app.runtime import get_bundle_root
 
 
@@ -46,9 +47,15 @@ app.include_router(codex.router)
 def startup():
     init_db()
     reload_active_account()
+    registration_task_manager.start()
     logging.info("启动完成: %s v%s", settings.APP_NAME, settings.APP_VERSION)
     logging.info("API Docs: %s/api/docs", settings.public_base_url)
     logging.info("Codex 代理: %s", settings.codex_proxy_url)
+
+
+@app.on_event("shutdown")
+def shutdown():
+    registration_task_manager.stop()
 
 
 @app.get("/api/health")

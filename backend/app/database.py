@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, create_engine, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from app.config import settings
@@ -133,3 +133,65 @@ def init_db():
     if engine.url.get_backend_name() == "sqlite" and engine.url.database:
         Path(engine.url.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    _dedupe_registration_tasks()
+    _ensure_registration_task_unique_index()
+
+
+def _dedupe_registration_tasks():
+    db = SessionLocal()
+    try:
+        duplicated_emails = [
+            email
+            for (email,) in (
+                db.query(RegistrationTask.email)
+                .group_by(RegistrationTask.email)
+                .having(func.count(RegistrationTask.id) > 1)
+                .all()
+            )
+        ]
+        for email in duplicated_emails:
+            tasks = (
+                db.query(RegistrationTask)
+                .filter(RegistrationTask.email == email)
+                .order_by(
+                    RegistrationTask.updated_at.desc(),
+                    RegistrationTask.created_at.desc(),
+                    RegistrationTask.id.desc(),
+                )
+                .all()
+            )
+            account = (
+                db.query(Account)
+                .filter(Account.email == email, Account.status == "active")
+                .order_by(Account.updated_at.desc(), Account.created_at.desc(), Account.id.desc())
+                .first()
+            )
+
+            keep_task = None
+            if account:
+                keep_task = next((task for task in tasks if task.account_id == account.id), None)
+                if not keep_task:
+                    keep_task = next((task for task in tasks if task.status == "done"), None)
+                if not keep_task:
+                    keep_task = tasks[0]
+                    keep_task.status = "done"
+                    keep_task.account_id = account.id
+            else:
+                keep_task = next((task for task in tasks if task.status != "failed"), None) or tasks[0]
+
+            keep_task.updated_at = datetime.utcnow()
+            for task in tasks:
+                if task.id != keep_task.id:
+                    db.delete(task)
+            db.commit()
+    finally:
+        db.close()
+
+
+def _ensure_registration_task_unique_index():
+    if engine.url.get_backend_name() != "sqlite":
+        return
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_registration_tasks_email ON registration_tasks(email)"
+        )

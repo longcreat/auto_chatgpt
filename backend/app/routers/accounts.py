@@ -5,7 +5,7 @@ import string
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import Account, RegistrationTask, get_db
@@ -20,6 +20,7 @@ from app.schemas import (
 )
 from app.serializers import serialize_account
 from app.services import codex_service
+from app.services.registration_task_service import registration_task_manager
 from app.services.settings_service import get_domain_name
 from app.services.token_service import replace_account_tokens
 
@@ -39,60 +40,63 @@ def _access_token_expires_at(result: dict) -> datetime | None:
     return registration_service.oauth_access_token_expires_at(result)
 
 
-def _run_registration_task(task_id: int, email: str, db_session):
-    """后台注册任务 (同步, 由 BackgroundTasks 在线程中执行)"""
-    from app.services import registration_service
+def _normalize_emails(body: RegistrationRequest) -> list[str]:
+    emails_to_register: list[str] = []
 
-    db = db_session()
-    try:
-        task = db.query(RegistrationTask).filter(RegistrationTask.id == task_id).first()
-        if not task:
-            return
+    for email in body.emails:
+        email_value = email.strip()
+        if email_value:
+            emails_to_register.append(email_value)
 
-        task.status = "running"
+    if body.email:
+        email_value = body.email.strip()
+        if email_value:
+            emails_to_register.append(email_value)
+
+    if emails_to_register:
+        seen: set[str] = set()
+        unique_emails: list[str] = []
+        for email in emails_to_register:
+            if email not in seen:
+                seen.add(email)
+                unique_emails.append(email)
+        return unique_emails
+
+    if body.use_domain_email:
+        domain = get_domain_name()
+        if not domain:
+            raise HTTPException(status_code=400, detail="请先在「系统配置」中配置域名")
+        for _ in range(body.count):
+            emails_to_register.append(_random_domain_email())
+        return emails_to_register
+
+    raise HTTPException(status_code=400, detail="请提供邮箱或启用域名邮箱")
+
+
+def _create_registration_task(db: Session, email: str) -> RegistrationTask:
+    existing_account = db.query(Account).filter(Account.email == email).first()
+    if existing_account:
+        raise HTTPException(status_code=400, detail=f"邮箱 {email} 已注册，不能重复创建任务")
+
+    existing_task = db.query(RegistrationTask).filter(RegistrationTask.email == email).first()
+    if existing_task:
+        if existing_task.status in ("queued", "running"):
+            return existing_task
+        existing_task.status = "queued"
+        existing_task.account_id = None
+        existing_task.log = f"[{datetime.now().strftime('%H:%M:%S')}] 任务已重置，重新开始注册。"
+        existing_task.updated_at = datetime.utcnow()
         db.commit()
+        db.refresh(existing_task)
+        registration_task_manager.enqueue(existing_task.id)
+        return existing_task
 
-        log_lines: list[str] = []
-        try:
-            result = registration_service.register_account(email, log_lines)
-            if result["success"]:
-                acc = Account(
-                    email=result["email"],
-                    password=result["password"],
-                    session_token=result.get("session_token"),
-                    access_token=result.get("access_token"),
-                    token_expires_at=_access_token_expires_at(result),
-                    status="active",
-                )
-                db.add(acc)
-                db.commit()
-                db.refresh(acc)
-
-                replace_account_tokens(
-                    db,
-                    acc,
-                    {
-                        "access_token": (result.get("access_token"), _access_token_expires_at(result)),
-                        "refresh_token": (result.get("refresh_token"), None),
-                        "id_token": (result.get("id_token"), None),
-                        "session_token": (result.get("session_token"), None),
-                    },
-                )
-                db.commit()
-
-                task.status = "done"
-                task.account_id = acc.id
-            else:
-                task.status = "failed"
-        except Exception as exc:
-            task.status = "failed"
-            log_lines.append(f"[Error] {exc}")
-
-        task.log = "\n".join(log_lines)
-        task.updated_at = datetime.utcnow()
-        db.commit()
-    finally:
-        db.close()
+    task = RegistrationTask(email=email, status="queued")
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    registration_task_manager.enqueue(task.id)
+    return task
 
 
 @router.get("", response_model=List[AccountOut])
@@ -103,7 +107,12 @@ def list_accounts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 
 @router.get("/tasks", response_model=List[RegistrationTaskOut])
 def list_tasks(db: Session = Depends(get_db)):
-    return db.query(RegistrationTask).order_by(RegistrationTask.created_at.desc()).limit(100).all()
+    return (
+        db.query(RegistrationTask)
+        .order_by(RegistrationTask.updated_at.desc(), RegistrationTask.created_at.desc())
+        .limit(100)
+        .all()
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=RegistrationTaskOut)
@@ -247,30 +256,31 @@ async def fetch_account_token(account_id: int, db: Session = Depends(get_db)):
 @router.post("/register", response_model=List[RegistrationTaskOut])
 async def auto_register(
     body: RegistrationRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    emails_to_register: list[str] = []
-    if body.email:
-        emails_to_register.append(body.email)
-    elif body.use_domain_email:
-        domain = get_domain_name()
-        if not domain:
-            raise HTTPException(status_code=400, detail="请先在「系统配置」中配置域名")
-        for _ in range(body.count):
-            emails_to_register.append(_random_domain_email())
-    else:
-        raise HTTPException(status_code=400, detail="请提供邮箱或启用域名邮箱")
-
-    from app.database import SessionLocal as session_local
-
+    emails_to_register = _normalize_emails(body)
     tasks = []
     for email in emails_to_register:
-        task = RegistrationTask(email=email, status="queued")
-        db.add(task)
-        db.commit()
-        db.refresh(task)
-        background_tasks.add_task(_run_registration_task, task.id, email, session_local)
-        tasks.append(task)
+        tasks.append(_create_registration_task(db, email))
 
     return tasks
+
+
+@router.post("/tasks/{task_id}/retry", response_model=RegistrationTaskOut)
+def retry_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(RegistrationTask).filter(RegistrationTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status != "failed":
+        raise HTTPException(status_code=400, detail="仅失败任务支持重试")
+    existing_account = db.query(Account).filter(Account.email == task.email).first()
+    if existing_account:
+        raise HTTPException(status_code=400, detail=f"邮箱 {task.email} 已注册，不能重复创建任务")
+    task.status = "queued"
+    task.account_id = None
+    task.log = f"[{datetime.now().strftime('%H:%M:%S')}] 手动重试，重新开始注册。"
+    task.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+    registration_task_manager.enqueue(task.id)
+    return task
