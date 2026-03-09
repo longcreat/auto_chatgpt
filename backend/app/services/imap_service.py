@@ -186,6 +186,11 @@ def _blocking_wait_for_email(
                 if new_nums:
                     logger.info(f"[IMAP] 发现 {len(new_nums)} 封新邮件 (今日共 {len(msg_nums)})")
 
+                    # 扫描所有新邮件, 取最新匹配的 OTP (避免取到被后续发送覆盖的旧码)
+                    latest_otp = None
+                    latest_link = None
+                    latest_num = None
+
                     for num in new_nums:
                         seen_nums.add(num)
 
@@ -239,9 +244,14 @@ def _blocking_wait_for_email(
                         logger.info(f"[IMAP]   → OTP={otp}, link={'有' if link else '无'}")
 
                         if otp or link:
-                            imap.store(num, "+FLAGS", "\\Seen")
-                            logger.info(f"[IMAP] ✅ 验证码获取成功: OTP={otp}")
-                            return otp, link
+                            latest_otp = otp
+                            latest_link = link
+                            latest_num = num
+
+                    if latest_num:
+                        imap.store(latest_num, "+FLAGS", "\\Seen")
+                        logger.info(f"[IMAP] ✅ 验证码获取成功: OTP={latest_otp}")
+                        return latest_otp, latest_link
                 else:
                     logger.info(f"[IMAP] 无新邮件")
             else:

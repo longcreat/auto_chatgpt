@@ -849,10 +849,10 @@ class ChatGPTRegistrar:
         return r.status_code, data
 
     # ── Step 2: Send OTP ──────────────────────────────────
-    def send_otp(self) -> Tuple[int, dict]:
+    def send_otp(self, referer: str = None) -> Tuple[int, dict]:
         nav_headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": f"{self.AUTH}/create-account/password",
+            "Referer": referer or f"{self.AUTH}/create-account/password",
             "Upgrade-Insecure-Requests": "1",
         }
         # 2a: 触发发送
@@ -1212,8 +1212,18 @@ class ChatGPTRegistrar:
         # 3b. 如果要求 email OTP 验证 (新号首次登录常见)
         if page_type == "email_otp_verification" or "email-verification" in continue_url:
             self._log("[OAuth] 3b/5 需要邮箱 OTP 验证 (登录二次验证)")
-            # 触发发送 OTP
-            self.send_otp()
+            # ⚠️ 不要调用 send_otp() — 它会 GET /api/accounts/email-otp/send 把
+            #    会话从登录上下文切换到注册/onboarding 上下文, 导致 OTP 验证后
+            #    返回 about_you (注册流) 而非 consent (登录流)。
+            # password/verify 已经触发了 OTP 发送, 只需访问 email-verification 页面。
+            ev_url = continue_url if continue_url.startswith("http") else f"{OAUTH_ISSUER}{continue_url}"
+            login_referer = f"{OAUTH_ISSUER}/log-in/password"
+            self.session.get(ev_url, headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": login_referer,
+                "Upgrade-Insecure-Requests": "1",
+            }, allow_redirects=True, timeout=30)
+            self._log("[OAuth] 已访问 email-verification 页面")
             _human_delay(0.3, 0.8)
 
             # IMAP 轮询等待验证码
@@ -1228,11 +1238,30 @@ class ChatGPTRegistrar:
             self._log(f"[OAuth] 收到登录验证码: {otp}")
             _human_delay(0.3, 0.8)
 
-            # 验证 OTP
+            # 验证 OTP (失败则显式重发一次, 保持登录上下文)
             otp_status, otp_data = self.validate_otp(otp)
             if otp_status != 200:
-                self._log(f"[OAuth] 登录 OTP 验证失败: {otp_status} {otp_data}")
-                return None
+                self._log(f"[OAuth] OTP 验证失败 ({otp_status}), 显式重发验证码 ...")
+                _human_delay(0.5, 1.0)
+                # 重发: 直接 GET email-otp/send (用登录 Referer, 不走 send_otp)
+                self.session.get(
+                    f"{OAUTH_ISSUER}/api/accounts/email-otp/send",
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Referer": login_referer,
+                        "Upgrade-Insecure-Requests": "1",
+                    }, allow_redirects=True, timeout=30,
+                )
+                otp2, _ = wait_for_verification_email_sync(
+                    email, timeout=60, poll_interval=5,
+                )
+                if otp2:
+                    self._log(f"[OAuth] 收到新验证码: {otp2}")
+                    _human_delay(0.3, 0.8)
+                    otp_status, otp_data = self.validate_otp(otp2)
+                if otp_status != 200:
+                    self._log(f"[OAuth] 登录 OTP 验证失败: {otp_status} {otp_data}")
+                    return None
 
             # OTP 验证通过后更新 continue_url
             continue_url = ""
@@ -1243,7 +1272,7 @@ class ChatGPTRegistrar:
             if continue_url and continue_url.startswith("/"):
                 continue_url = f"{OAUTH_ISSUER}{continue_url}"
 
-            # 3c. 如果 OTP 后进入 about_you (账号资料页), 需要提交姓名+生日
+            # 3c. 如果 OTP 后进入 about_you (账号资料页)
             if otp_page == "about_you" or "about-you" in continue_url:
                 name = getattr(self, "_reg_name", None)
                 bdate = getattr(self, "_reg_birthdate", None)
@@ -1261,7 +1290,15 @@ class ChatGPTRegistrar:
                     if continue_url and continue_url.startswith("/"):
                         continue_url = f"{OAUTH_ISSUER}{continue_url}"
                 else:
-                    self._log(f"[OAuth] create_account 失败: {ca_status} {ca_data}")
+                    # user_already_exists: 账号已存在, 直接跳转 consent
+                    err_code = ""
+                    if isinstance(ca_data, dict):
+                        err_code = (ca_data.get("error") or {}).get("code", "")
+                    if err_code == "user_already_exists" or ca_status == 400:
+                        self._log("[OAuth] 账号已存在, 直接跳转 consent 页面")
+                        continue_url = f"{OAUTH_ISSUER}/sign-in-with-chatgpt/codex/consent"
+                    else:
+                        self._log(f"[OAuth] create_account 失败: {ca_status} {ca_data}")
 
         # 4. 跟随 consent → 提取 authorization code
         self._log("[OAuth] 4/5 提取 authorization code ...")
