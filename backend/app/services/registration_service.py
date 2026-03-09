@@ -940,6 +940,10 @@ class ChatGPTRegistrar:
         full_name = f"{first_name} {last_name}"
         birthdate = _random_birthday()
 
+        # 保存到实例, 供 oauth_login 中 about_you 步骤复用
+        self._reg_name = full_name
+        self._reg_birthdate = birthdate
+
         result = {
             "success": False,
             "email": email,
@@ -1038,30 +1042,13 @@ class ChatGPTRegistrar:
     #  OAuth 登录换 Codex Token
     # ═══════════════════════════════════════════════════════
 
-    def oauth_login(self, email: str, password: str) -> Optional[Dict[str, str]]:
+    def oauth_login(self, email: str, password: str, max_retries: int = 5) -> Optional[Dict[str, str]]:
         """
         注册成功后执行 Codex OAuth 流程, 换取 access_token / refresh_token。
         返回 token dict 或 None。
+        包含 Cloudflare 403 重试 + 换指纹逻辑。
         """
         self._log("[OAuth] 开始 Codex OAuth 流程 ...")
-
-        # 确保 auth 域也有 oai-did
-        self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
-        self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
-
-        code_verifier, code_challenge = _generate_pkce()
-        state = secrets.token_urlsafe(24)
-
-        auth_params = {
-            "response_type": "code",
-            "client_id": OAUTH_CLIENT_ID,
-            "redirect_uri": OAUTH_REDIRECT_URI,
-            "scope": "openid profile email offline_access",
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": state,
-        }
-        auth_url = f"{OAUTH_ISSUER}/oauth/authorize?{urlencode(auth_params)}"
 
         def _json_headers(referer: str) -> dict:
             h = {
@@ -1075,51 +1062,117 @@ class ChatGPTRegistrar:
             h.update(_make_trace_headers())
             return h
 
-        # 1. GET /oauth/authorize → login_session
-        self._log("[OAuth] 1/5 GET /oauth/authorize")
-        try:
-            r = self.session.get(auth_url, headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Referer": f"{self.CHATGPT}/",
-                "Upgrade-Insecure-Requests": "1",
-            }, allow_redirects=True, timeout=30)
-        except Exception as e:
-            self._log(f"[OAuth] authorize 异常: {e}")
-            return None
+        # 步骤 1-2 可能遭遇 Cloudflare 403, 包裹在重试循环中
+        r2_data = None
+        code_verifier = None
+        for attempt in range(1, max_retries + 1):
+            # 确保 auth 域也有 oai-did
+            self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
+            self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
 
-        has_login = any(getattr(c, "name", "") == "login_session" for c in self.session.cookies)
-        self._log(f"[OAuth] login_session: {'有' if has_login else '无'}")
+            code_verifier, code_challenge = _generate_pkce()
+            state = secrets.token_urlsafe(24)
 
-        # 2. POST authorize/continue → 提交邮箱 (需 sentinel)
-        self._log("[OAuth] 2/5 POST authorize/continue")
-        sentinel = _build_sentinel_token(
-            self.session, self.device_id, self.ua, self.sec_ch_ua,
-            self.impersonate, flow="authorize_continue", fp=self.fp,
-        )
-        if not sentinel:
-            self._log("[OAuth] sentinel token 获取失败")
-            return None
+            auth_params = {
+                "response_type": "code",
+                "client_id": OAUTH_CLIENT_ID,
+                "redirect_uri": OAUTH_REDIRECT_URI,
+                "scope": "openid profile email offline_access",
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "state": state,
+            }
+            auth_url = f"{OAUTH_ISSUER}/oauth/authorize?{urlencode(auth_params)}"
 
-        h_continue = _json_headers(f"{OAUTH_ISSUER}/log-in")
-        h_continue["openai-sentinel-token"] = sentinel
-        try:
-            r2 = self.session.post(
-                f"{OAUTH_ISSUER}/api/accounts/authorize/continue",
-                json={"username": {"kind": "email", "value": email}},
-                headers=h_continue, timeout=30, allow_redirects=False,
+            # 1. GET /oauth/authorize → login_session
+            self._log(f"[OAuth] 1/5 GET /oauth/authorize (尝试 {attempt}/{max_retries})")
+            try:
+                r = self.session.get(auth_url, headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br, zstd",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                }, allow_redirects=True, timeout=30)
+            except Exception as e:
+                self._log(f"[OAuth] authorize 异常: {e}")
+                if attempt < max_retries:
+                    delay = 3.0 + attempt * 3.0
+                    _human_delay(delay, delay + 3.0)
+                    self._reinit_session()
+                    continue
+                return None
+
+            if r.status_code == 403:
+                self._log(f"[OAuth] authorize 403, 换指纹重试 ({attempt}/{max_retries}) ...")
+                if attempt < max_retries:
+                    delay = 3.0 + attempt * 3.0
+                    _human_delay(delay, delay + 3.0)
+                    self._reinit_session()
+                    continue
+                self._log("[OAuth] authorize 持续 403, 放弃")
+                return None
+
+            has_login = any(getattr(c, "name", "") == "login_session" for c in self.session.cookies)
+            self._log(f"[OAuth] login_session: {'有' if has_login else '无'}")
+
+            # 2. POST authorize/continue → 提交邮箱 (需 sentinel)
+            self._log("[OAuth] 2/5 POST authorize/continue")
+            sentinel = _build_sentinel_token(
+                self.session, self.device_id, self.ua, self.sec_ch_ua,
+                self.impersonate, flow="authorize_continue", fp=self.fp,
             )
-        except Exception as e:
-            self._log(f"[OAuth] authorize/continue 异常: {e}")
-            return None
+            if not sentinel:
+                self._log("[OAuth] sentinel token 获取失败")
+                if attempt < max_retries:
+                    delay = 3.0 + attempt * 3.0
+                    _human_delay(delay, delay + 3.0)
+                    self._reinit_session()
+                    continue
+                return None
 
-        if r2.status_code != 200:
-            self._log(f"[OAuth] authorize/continue 失败: {r2.status_code} {r2.text[:200]}")
-            return None
-        try:
-            r2_data = r2.json()
-            self._log(f"[OAuth] authorize/continue 响应: {json.dumps(r2_data, ensure_ascii=False)[:300]}")
-        except Exception:
-            self._log(f"[OAuth] authorize/continue 响应 (非JSON): {r2.text[:200]}")
+            h_continue = _json_headers(f"{OAUTH_ISSUER}/log-in")
+            h_continue["openai-sentinel-token"] = sentinel
+            try:
+                r2 = self.session.post(
+                    f"{OAUTH_ISSUER}/api/accounts/authorize/continue",
+                    json={"username": {"kind": "email", "value": email}},
+                    headers=h_continue, timeout=30, allow_redirects=False,
+                )
+            except Exception as e:
+                self._log(f"[OAuth] authorize/continue 异常: {e}")
+                if attempt < max_retries:
+                    delay = 3.0 + attempt * 3.0
+                    _human_delay(delay, delay + 3.0)
+                    self._reinit_session()
+                    continue
+                return None
+
+            if r2.status_code == 403:
+                self._log(f"[OAuth] authorize/continue 403, 换指纹重试 ({attempt}/{max_retries}) ...")
+                if attempt < max_retries:
+                    delay = 3.0 + attempt * 3.0
+                    _human_delay(delay, delay + 3.0)
+                    self._reinit_session()
+                    continue
+                self._log("[OAuth] authorize/continue 持续 403, 放弃")
+                return None
+
+            if r2.status_code != 200:
+                self._log(f"[OAuth] authorize/continue 失败: {r2.status_code} {r2.text[:200]}")
+                return None
+
+            try:
+                r2_data = r2.json()
+                self._log(f"[OAuth] authorize/continue 响应: {json.dumps(r2_data, ensure_ascii=False)[:300]}")
+            except Exception:
+                self._log(f"[OAuth] authorize/continue 响应 (非JSON): {r2.text[:200]}")
+
+            # 步骤 1-2 成功, 跳出重试循环
+            break
 
         # 3. POST password/verify → 提交密码 (需 sentinel)
         self._log("[OAuth] 3/5 POST password/verify")
@@ -1152,8 +1205,63 @@ class ChatGPTRegistrar:
         except Exception:
             verify_data = {}
         continue_url = verify_data.get("continue_url", "")
+        page_type = (verify_data.get("page") or {}).get("type", "")
         self._log(f"[OAuth] password/verify 响应: {json.dumps(verify_data, ensure_ascii=False)[:300]}")
-        self._log(f"[OAuth] continue_url = {continue_url}")
+        self._log(f"[OAuth] continue_url = {continue_url}, page_type = {page_type}")
+
+        # 3b. 如果要求 email OTP 验证 (新号首次登录常见)
+        if page_type == "email_otp_verification" or "email-verification" in continue_url:
+            self._log("[OAuth] 3b/5 需要邮箱 OTP 验证 (登录二次验证)")
+            # 触发发送 OTP
+            self.send_otp()
+            _human_delay(0.3, 0.8)
+
+            # IMAP 轮询等待验证码
+            _reg_timeout = settings.REGISTRATION_TIMEOUT
+            self._log(f"[OAuth] 等待登录验证码 (IMAP 轮询, 最长 {_reg_timeout}s) ...")
+            otp, _ = wait_for_verification_email_sync(
+                email, timeout=_reg_timeout, poll_interval=5,
+            )
+            if not otp:
+                self._log("[OAuth] 未收到登录验证码, 超时")
+                return None
+            self._log(f"[OAuth] 收到登录验证码: {otp}")
+            _human_delay(0.3, 0.8)
+
+            # 验证 OTP
+            otp_status, otp_data = self.validate_otp(otp)
+            if otp_status != 200:
+                self._log(f"[OAuth] 登录 OTP 验证失败: {otp_status} {otp_data}")
+                return None
+
+            # OTP 验证通过后更新 continue_url
+            continue_url = ""
+            if isinstance(otp_data, dict):
+                continue_url = otp_data.get("continue_url", "")
+                otp_page = (otp_data.get("page") or {}).get("type", "")
+                self._log(f"[OAuth] OTP 验证通过 → continue_url={continue_url}, page={otp_page}")
+            if continue_url and continue_url.startswith("/"):
+                continue_url = f"{OAUTH_ISSUER}{continue_url}"
+
+            # 3c. 如果 OTP 后进入 about_you (账号资料页), 需要提交姓名+生日
+            if otp_page == "about_you" or "about-you" in continue_url:
+                name = getattr(self, "_reg_name", None)
+                bdate = getattr(self, "_reg_birthdate", None)
+                if not name or not bdate:
+                    fn, ln = _random_name()
+                    name = name or f"{fn} {ln}"
+                    bdate = bdate or _random_birthday()
+                self._log(f"[OAuth] 3c/5 完善账号信息 ({name}, {bdate}) ...")
+                _human_delay(0.3, 0.8)
+                ca_status, ca_data = self.create_account(name, bdate)
+                if ca_status == 200 and isinstance(ca_data, dict):
+                    continue_url = ca_data.get("continue_url", "")
+                    ca_page = (ca_data.get("page") or {}).get("type", "")
+                    self._log(f"[OAuth] create_account → continue_url={continue_url}, page={ca_page}")
+                    if continue_url and continue_url.startswith("/"):
+                        continue_url = f"{OAUTH_ISSUER}{continue_url}"
+                else:
+                    self._log(f"[OAuth] create_account 失败: {ca_status} {ca_data}")
 
         # 4. 跟随 consent → 提取 authorization code
         self._log("[OAuth] 4/5 提取 authorization code ...")
