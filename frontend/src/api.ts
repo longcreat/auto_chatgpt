@@ -51,3 +51,10 @@ export const codexReload = () => api.post('/codex/reload').then(r => r.data)
 export const getCodexPluginStatus = () => api.get('/codex/plugin-status').then(r => r.data)
 export const switchCodexPluginAccount = (id: number) =>
   api.post('/codex/plugin-switch', { account_id: id }).then(r => r.data)
+
+// ─── OAuth 回调捕获 ────────────────────────────────────────────
+
+export const startOpenClawOAuth = (auth_url: string, account_id: number) =>
+  api.post('/oauth/openclaw', { auth_url, account_id }).then(r => r.data)
+export const getOpenClawResult = (taskId: string) =>
+  api.get(`/oauth/openclaw/${taskId}`).then(r => r.data)

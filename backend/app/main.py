@@ -10,6 +10,7 @@ from app.config import settings
 from app.database import init_db
 from app.routers import accounts, codex, domains, tokens
 from app.routers import settings as settings_router
+from app.routers import oauth_capture
 from app.services.codex_service import reload_active_account
 from app.services.registration_task_service import registration_task_manager
 from app.runtime import get_bundle_root
@@ -41,6 +42,7 @@ app.include_router(tokens.router)
 app.include_router(domains.router)
 app.include_router(settings_router.router)
 app.include_router(codex.router)
+app.include_router(oauth_capture.router)
 
 
 @app.on_event("startup")

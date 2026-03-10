@@ -1,11 +1,12 @@
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, KeyRound, Globe, Bot } from 'lucide-react'
+import { LayoutDashboard, Users, KeyRound, Globe, Bot, Link } from 'lucide-react'
 import clsx from 'clsx'
 import Dashboard from './pages/Dashboard'
 import Accounts from './pages/Accounts'
 import Tokens from './pages/Tokens'
 import Domains from './pages/Domains'
 import CodexPage from './pages/CodexPage'
+import OAuthCapture from './pages/OAuthCapture'
 
 const NAV = [
   { to: '/', icon: LayoutDashboard, label: '概览' },
@@ -13,6 +14,7 @@ const NAV = [
   { to: '/tokens', icon: KeyRound, label: 'Token 管理' },
   { to: '/domains', icon: Globe, label: '域名邮箱' },
   { to: '/codex', icon: Bot, label: 'Codex 集成' },
+  { to: '/oauth-capture', icon: Link, label: 'OAuth 授权' },
 ]
 
 export default function App() {
@@ -58,6 +60,7 @@ export default function App() {
             <Route path="/tokens" element={<Tokens />} />
             <Route path="/domains" element={<Domains />} />
             <Route path="/codex" element={<CodexPage />} />
+            <Route path="/oauth-capture" element={<OAuthCapture />} />
           </Routes>
         </main>
       </div>
