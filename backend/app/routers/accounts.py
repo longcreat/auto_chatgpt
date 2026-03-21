@@ -4,6 +4,7 @@ import random
 import string
 from datetime import datetime
 from typing import List
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -73,7 +74,7 @@ def _normalize_emails(body: RegistrationRequest) -> list[str]:
     raise HTTPException(status_code=400, detail="请提供邮箱或启用域名邮箱")
 
 
-def _create_registration_task(db: Session, email: str) -> RegistrationTask:
+def _create_registration_task(db: Session, email: str, batch_key: str | None = None) -> RegistrationTask:
     existing_account = db.query(Account).filter(Account.email == email).first()
     if existing_account:
         raise HTTPException(status_code=400, detail=f"邮箱 {email} 已注册，不能重复创建任务")
@@ -81,6 +82,8 @@ def _create_registration_task(db: Session, email: str) -> RegistrationTask:
     existing_task = db.query(RegistrationTask).filter(RegistrationTask.email == email).first()
     if existing_task:
         if existing_task.status in ("queued", "running"):
+            if batch_key:
+                registration_task_manager.register_task_batch(existing_task.id, batch_key)
             return existing_task
         existing_task.status = "queued"
         existing_task.account_id = None
@@ -88,6 +91,8 @@ def _create_registration_task(db: Session, email: str) -> RegistrationTask:
         existing_task.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(existing_task)
+        if batch_key:
+            registration_task_manager.register_task_batch(existing_task.id, batch_key)
         registration_task_manager.enqueue(existing_task.id)
         return existing_task
 
@@ -95,12 +100,14 @@ def _create_registration_task(db: Session, email: str) -> RegistrationTask:
     db.add(task)
     db.commit()
     db.refresh(task)
+    if batch_key:
+        registration_task_manager.register_task_batch(task.id, batch_key)
     registration_task_manager.enqueue(task.id)
     return task
 
 
 @router.get("", response_model=List[AccountOut])
-def list_accounts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def list_accounts(skip: int = 0, limit: int = 10000, db: Session = Depends(get_db)):
     accounts = db.query(Account).offset(skip).limit(limit).all()
     return [serialize_account(account) for account in accounts]
 
@@ -259,9 +266,10 @@ async def auto_register(
     db: Session = Depends(get_db),
 ):
     emails_to_register = _normalize_emails(body)
+    batch_key = f"batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
     tasks = []
     for email in emails_to_register:
-        tasks.append(_create_registration_task(db, email))
+        tasks.append(_create_registration_task(db, email, batch_key=batch_key))
 
     return tasks
 
